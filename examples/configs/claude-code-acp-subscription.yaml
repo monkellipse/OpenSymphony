@@ -1,0 +1,58 @@
+# Run OpenSymphony issues through Claude Code over ACP, authenticated with a
+# Claude Pro/Max subscription instead of a metered Anthropic API key.
+#
+#   OpenSymphony -> OpenHands agent-server -> Claude Code ACP -> Claude subscription
+#
+# Prerequisites
+# -------------
+#   opensymphony install openhands     # pinned openhands-agent-server
+#   claude login                       # writes OAuth credentials to ~/.claude
+#   node/npx on PATH                   # launches @agentclientprotocol/claude-agent-acp
+#
+# The ACP subprocess inherits the agent-server's environment, so the
+# agent-server must run as the same user that ran `claude login` (or must see
+# the same CLAUDE_CONFIG_DIR).
+#
+# Merge the `openhands:` block below into your WORKFLOW.md front matter.
+
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+
+  conversation:
+    agent:
+      kind: ACPAgent
+
+      # Claude Code's ACP server. `npx -y` fetches it on first use.
+      acp_command:
+        - npx
+        - -y
+        - "@agentclientprotocol/claude-agent-acp"
+
+      # Suppress per-tool permission prompts; required for unattended runs.
+      # Codex ACP uses `full-access`, Gemini CLI uses `yolo`.
+      acp_session_mode: bypassPermissions
+
+      # Optional. Omit to let Claude Code pick its own default.
+      acp_model: claude-opus-4-7
+
+      # Forward the Claude Code OAuth credential directory to the ACP
+      # subprocess as CLAUDE_CONFIG_DIR. Read from $CLAUDE_CONFIG_DIR, falling
+      # back to $HOME/.claude. Setting it also makes the OpenHands SDK strip
+      # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the subprocess, so an
+      # inherited API key cannot silently override subscription auth.
+      acp_credential_mode: claude_subscription
+
+      # Optional: point at a non-default credential directory.
+      # acp_auth_directory_env: CLAUDE_CONFIG_DIR
+
+      # Optional: cap a single Claude Code turn (SDK default is 30 minutes).
+      # acp_prompt_timeout_ms: 1800000
+
+      # Optional: extra environment for the ACP subprocess.
+      # acp_env:
+      #   ANTHROPIC_LOG: debug
+
+      # NOTE: `llm`, `condenser`, `tools`, and `include_default_tools` are
+      # rejected under `kind: ACPAgent` — Claude Code owns the model, the tool
+      # surface, and its own context management.

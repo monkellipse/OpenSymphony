@@ -380,7 +380,7 @@ fn long_history_request(workspace_root: &Path, model: &str) -> ConversationCreat
         },
         agent: AgentConfig {
             kind: "Agent".to_string(),
-            llm: llm.clone(),
+            llm: Some(llm.clone()),
             condenser: Some(CondenserConfig::llm_summarizing(
                 llm,
                 LONG_HISTORY_MAX_SIZE,
@@ -388,6 +388,7 @@ fn long_history_request(workspace_root: &Path, model: &str) -> ConversationCreat
             )),
             tools: None,
             include_default_tools: None,
+            ..Default::default()
         },
     }
 }

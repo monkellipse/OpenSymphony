@@ -41,6 +41,9 @@ use super::{
 
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
 const OPENAI_SUBSCRIPTION_CREDENTIAL_MODE: &str = "openai_subscription";
+const CLAUDE_SUBSCRIPTION_CREDENTIAL_MODE: &str = "claude_subscription";
+const CLAUDE_CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+const DEFAULT_CLAUDE_CONFIG_DIR_NAME: &str = ".claude";
 const OPENAI_CODEX_SUBSCRIPTION_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_REUSE_POLICY: &str = "per_issue";
 const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
@@ -382,7 +385,9 @@ pub struct ConversationLaunchProfile {
     pub workspace_kind: String,
     pub confirmation_policy_kind: String,
     pub agent_kind: String,
-    pub llm_model: String,
+    /// `None` for ACP agents, where the ACP server owns the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
     #[serde(default = "default_llm_credential_mode")]
     pub llm_credential_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +402,9 @@ pub struct ConversationLaunchProfile {
     pub agent_include_default_tools: Option<Vec<String>>,
     pub max_iterations: u32,
     pub stuck_detection: bool,
+    /// Present only for ACP agent kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<ConversationLaunchAcpProfile>,
     /// Fingerprint of the API key used when creating this conversation.
     /// Used to detect when the API key has changed and the conversation needs reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -417,6 +425,23 @@ pub struct ConversationLaunchSubscriptionProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationLaunchAcpProfile {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_timeout_ms: Option<u64>,
+    pub credential_mode: String,
+    pub auth_directory_env: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationLaunchCondenserProfile {
     pub max_size: u64,
     pub keep_first: u64,
@@ -426,6 +451,12 @@ impl ConversationLaunchProfile {
     /// Compute a fingerprint of the current API key from the environment.
     /// This is used to detect when the API key has changed.
     pub fn api_key_fingerprint(&self, env: &dyn Environment) -> Option<String> {
+        if self.acp.is_some() {
+            // The ACP server authenticates itself; there is no key for
+            // OpenSymphony to fingerprint or invalidate the conversation on.
+            return None;
+        }
+
         let api_key = if self.llm_credential_mode == OPENAI_SUBSCRIPTION_CREDENTIAL_MODE {
             self.llm_subscription
                 .as_ref()
@@ -455,15 +486,32 @@ impl ConversationLaunchProfile {
                 u32::MAX
             )
         })?;
+        let acp = conversation
+            .agent
+            .acp
+            .as_ref()
+            .map(|acp| ConversationLaunchAcpProfile {
+                command: acp.command.clone(),
+                args: acp.args.clone(),
+                env: acp.env.clone(),
+                session_mode: acp.session_mode.clone(),
+                model: acp.model.clone(),
+                prompt_timeout_ms: acp.prompt_timeout_ms,
+                credential_mode: acp.credential_mode.clone(),
+                auth_directory_env: acp.auth_directory_env.clone(),
+            });
+
+        // ACP servers own their own model, so `llm.model` is only required for
+        // the native OpenHands agent.
         let llm_model = conversation
             .agent
             .llm
             .as_ref()
             .and_then(|llm| llm.model.as_ref())
-            .cloned()
-            .ok_or_else(|| {
-                "workflow openhands.conversation.agent.llm.model is required".to_string()
-            })?;
+            .cloned();
+        if llm_model.is_none() && acp.is_none() {
+            return Err("workflow openhands.conversation.agent.llm.model is required".to_string());
+        }
 
         Ok(Self {
             workspace_kind: "LocalWorkspace".to_string(),
@@ -514,6 +562,7 @@ impl ConversationLaunchProfile {
             agent_include_default_tools: conversation.agent.include_default_tools.clone(),
             max_iterations,
             stuck_detection: conversation.stuck_detection,
+            acp,
             llm_api_key_fingerprint: None, // Computed when manifest is created
         })
     }
@@ -539,26 +588,88 @@ impl ConversationLaunchProfile {
             confirmation_policy: ConfirmationPolicy {
                 kind: self.confirmation_policy_kind.clone(),
             },
-            agent: AgentConfig {
-                kind: self.agent_kind.clone(),
-                llm: llm.clone(),
-                condenser: self.condenser.as_ref().map(|condenser| {
-                    CondenserConfig::llm_summarizing(
-                        llm.clone(),
-                        condenser.max_size,
-                        condenser.keep_first,
-                    )
-                }),
-                tools: self.agent_tools.clone(),
-                include_default_tools: self.agent_include_default_tools.clone(),
-            },
+            agent: self.to_agent_config(env, llm)?,
         })
     }
 
-    fn to_llm_config(&self, env: &dyn Environment) -> Result<LlmConfig, String> {
-        if self.llm_credential_mode == OPENAI_SUBSCRIPTION_CREDENTIAL_MODE {
-            return self.to_openai_subscription_llm_config(env);
+    fn to_agent_config(
+        &self,
+        env: &dyn Environment,
+        llm: Option<LlmConfig>,
+    ) -> Result<AgentConfig, String> {
+        if let Some(acp) = self.acp.as_ref() {
+            return self.to_acp_agent_config(env, acp);
         }
+
+        let llm = llm.ok_or_else(|| {
+            "openhands.conversation.agent.llm.model is required for non-ACP agents".to_string()
+        })?;
+
+        Ok(AgentConfig {
+            kind: self.agent_kind.clone(),
+            llm: Some(llm.clone()),
+            condenser: self.condenser.as_ref().map(|condenser| {
+                CondenserConfig::llm_summarizing(llm, condenser.max_size, condenser.keep_first)
+            }),
+            tools: self.agent_tools.clone(),
+            include_default_tools: self.agent_include_default_tools.clone(),
+            ..Default::default()
+        })
+    }
+
+    /// Build the `ACPAgent` payload.
+    ///
+    /// `llm`, `condenser`, and `tools` are deliberately omitted: the OpenHands
+    /// SDK substitutes an `acp-managed` sentinel LLM and an empty tool list for
+    /// ACP agents, because the ACP server (Claude Code, Codex, Gemini CLI, ...)
+    /// supplies its own model, tools, and context management.
+    fn to_acp_agent_config(
+        &self,
+        env: &dyn Environment,
+        acp: &ConversationLaunchAcpProfile,
+    ) -> Result<AgentConfig, String> {
+        let mut acp_env = acp.env.clone();
+
+        if acp.credential_mode == CLAUDE_SUBSCRIPTION_CREDENTIAL_MODE {
+            let config_dir = resolve_claude_config_dir(env, &acp.auth_directory_env)?;
+            // `CLAUDE_CONFIG_DIR` selects Claude Code's OAuth credential file,
+            // which is what makes a Pro/Max subscription usable here. The SDK
+            // strips ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the subprocess
+            // whenever this is set, so subscription auth cannot be silently
+            // overridden by an inherited API key.
+            acp_env
+                .entry(CLAUDE_CONFIG_DIR_VAR.to_string())
+                .or_insert(config_dir);
+        }
+
+        Ok(AgentConfig {
+            kind: self.agent_kind.clone(),
+            llm: None,
+            condenser: None,
+            tools: None,
+            include_default_tools: None,
+            acp_command: Some(acp.command.clone()),
+            acp_args: (!acp.args.is_empty()).then(|| acp.args.clone()),
+            acp_env: (!acp_env.is_empty()).then_some(acp_env),
+            acp_session_mode: acp.session_mode.clone(),
+            acp_model: acp.model.clone(),
+            acp_prompt_timeout_ms: acp.prompt_timeout_ms,
+        })
+    }
+
+    fn to_llm_config(&self, env: &dyn Environment) -> Result<Option<LlmConfig>, String> {
+        // ACP agents have no OpenSymphony-managed LLM at all.
+        if self.acp.is_some() {
+            return Ok(None);
+        }
+
+        if self.llm_credential_mode == OPENAI_SUBSCRIPTION_CREDENTIAL_MODE {
+            return self.to_openai_subscription_llm_config(env).map(Some);
+        }
+
+        let model = self.llm_model.clone().ok_or_else(|| {
+            "openhands.conversation.agent.llm.model is required for non-ACP agents".to_string()
+        })?;
 
         let api_key = resolve_provider_override(
             env,
@@ -573,15 +684,15 @@ impl ConversationLaunchProfile {
         )?
         .or_else(|| normalize_environment_value(env.get("LLM_BASE_URL")));
 
-        Ok(LlmConfig {
-            model: self.llm_model.clone(),
+        Ok(Some(LlmConfig {
+            model,
             api_key,
             base_url,
             usage_id: None,
             extra_headers: None,
             litellm_extra_body: None,
             stream: None,
-        })
+        }))
     }
 
     fn to_openai_subscription_llm_config(
@@ -627,8 +738,13 @@ impl ConversationLaunchProfile {
             extra_headers.insert("chatgpt-account-id".to_string(), account_id);
         }
 
+        let model = self.llm_model.as_deref().ok_or_else(|| {
+            "openhands.conversation.agent.llm.model is required for openai_subscription mode"
+                .to_string()
+        })?;
+
         Ok(LlmConfig {
-            model: normalize_openai_subscription_model(&self.llm_model)?,
+            model: normalize_openai_subscription_model(model)?,
             api_key: access_token,
             base_url: Some(OPENAI_CODEX_SUBSCRIPTION_BASE_URL.to_string()),
             usage_id: None,
@@ -679,6 +795,33 @@ fn resolve_provider_override(
         )
     })
     .map(Some)
+}
+
+/// Resolve the Claude Code configuration directory that holds the subscription
+/// OAuth credentials.
+///
+/// Prefers the configured environment variable (`CLAUDE_CONFIG_DIR` by default)
+/// and falls back to `$HOME/.claude`, which is where the Claude Code CLI stores
+/// credentials for a logged-in account.
+fn resolve_claude_config_dir(
+    env: &dyn Environment,
+    auth_directory_env: &str,
+) -> Result<String, String> {
+    if let Some(configured) = normalize_environment_value(env.get(auth_directory_env)) {
+        return Ok(configured);
+    }
+
+    let home = normalize_environment_value(env.get("HOME")).ok_or_else(|| {
+        format!(
+            "claude_subscription mode needs the Claude config directory: set `{auth_directory_env}` \
+             or `HOME` so the ACP server can find the logged-in account's credentials"
+        )
+    })?;
+
+    Ok(Path::new(&home)
+        .join(DEFAULT_CLAUDE_CONFIG_DIR_NAME)
+        .display()
+        .to_string())
 }
 
 fn normalize_environment_value(value: Option<String>) -> Option<String> {
@@ -2145,9 +2288,11 @@ impl IssueSessionRunner {
         manifest.fresh_conversation = false;
         manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
         // Note: We no longer update launch_profile on resume - use what's stored
-        manifest.llm_config_fingerprint.get_or_insert_with(|| {
-            LlmConfigFingerprint::from_llm_config(&stream.conversation().agent.llm)
-        });
+        if let Some(llm) = stream.conversation().agent.llm.as_ref() {
+            manifest
+                .llm_config_fingerprint
+                .get_or_insert_with(|| LlmConfigFingerprint::from_llm_config(llm));
+        }
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -2324,8 +2469,11 @@ impl IssueSessionRunner {
             launch_profile,
             self.environment.as_ref(),
         );
-        manifest.llm_config_fingerprint =
-            Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
+        manifest.llm_config_fingerprint = request
+            .agent
+            .llm
+            .as_ref()
+            .map(LlmConfigFingerprint::from_llm_config);
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -2477,7 +2625,12 @@ impl IssueSessionRunner {
             ### Summary of Previous Work\n\n\
             {}",
             conversation.conversation_id,
-            conversation.agent.llm.model,
+            conversation
+                .agent
+                .acp_model
+                .clone()
+                .or_else(|| conversation.agent.llm.as_ref().map(|llm| llm.model.clone()))
+                .unwrap_or_else(|| "unknown".to_string()),
             conversation.max_iterations,
             conversation.execution_status,
             summary.unwrap_or_else(|| "No summary available.".to_string())
@@ -3708,13 +3861,158 @@ mod tests {
         }
     }
 
+    fn acp_launch_profile(credential_mode: &str) -> ConversationLaunchProfile {
+        ConversationLaunchProfile {
+            workspace_kind: "LocalWorkspace".to_string(),
+            confirmation_policy_kind: "NeverConfirm".to_string(),
+            agent_kind: "ACPAgent".to_string(),
+            llm_model: None,
+            llm_credential_mode: default_llm_credential_mode(),
+            llm_api_key_env: None,
+            llm_base_url_env: None,
+            llm_subscription: None,
+            condenser: None,
+            agent_tools: None,
+            agent_include_default_tools: None,
+            max_iterations: 12,
+            stuck_detection: true,
+            acp: Some(ConversationLaunchAcpProfile {
+                command: vec![
+                    "npx".to_string(),
+                    "-y".to_string(),
+                    "@agentclientprotocol/claude-agent-acp".to_string(),
+                ],
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                session_mode: Some("bypassPermissions".to_string()),
+                model: Some("claude-opus-4-7".to_string()),
+                prompt_timeout_ms: Some(1_800_000),
+                credential_mode: credential_mode.to_string(),
+                auth_directory_env: "CLAUDE_CONFIG_DIR".to_string(),
+            }),
+            llm_api_key_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn acp_launch_profile_builds_openhands_acp_agent_request() {
+        let profile = acp_launch_profile("inherit");
+        let env = BTreeMap::new();
+
+        let request = must(profile.to_create_request(
+            &env,
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/workspace/.opensymphony/openhands"),
+            Some(Uuid::nil()),
+        ));
+
+        let agent = serde_json::to_value(&request.agent).expect("agent should serialize");
+
+        // The OpenHands SDK discriminates agents on `kind`, and ACPAgent
+        // supplies its own sentinel LLM when `llm` is absent.
+        assert_eq!(agent["kind"], json!("ACPAgent"));
+        assert!(agent.get("llm").is_none());
+        assert!(agent.get("condenser").is_none());
+        assert!(agent.get("tools").is_none());
+        assert_eq!(
+            agent["acp_command"],
+            json!(["npx", "-y", "@agentclientprotocol/claude-agent-acp"])
+        );
+        assert_eq!(agent["acp_session_mode"], json!("bypassPermissions"));
+        assert_eq!(agent["acp_model"], json!("claude-opus-4-7"));
+        // SDK field is fractional seconds; OpenSymphony config is milliseconds.
+        assert_eq!(agent["acp_prompt_timeout"], json!(1800.0));
+        assert!(agent.get("acp_env").is_none());
+    }
+
+    #[test]
+    fn acp_claude_subscription_mode_forwards_claude_config_dir() {
+        let profile = acp_launch_profile(CLAUDE_SUBSCRIPTION_CREDENTIAL_MODE);
+        let env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/home/orchestrator/.claude".to_string(),
+        )]);
+
+        let request = must(profile.to_create_request(
+            &env,
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/workspace/.opensymphony/openhands"),
+            Some(Uuid::nil()),
+        ));
+
+        assert_eq!(
+            request
+                .agent
+                .acp_env
+                .as_ref()
+                .and_then(|env| env.get("CLAUDE_CONFIG_DIR"))
+                .map(String::as_str),
+            Some("/home/orchestrator/.claude")
+        );
+        // No API key is resolved or fingerprinted: Claude Code authenticates
+        // itself from the OAuth credential file in that directory.
+        assert!(request.agent.llm.is_none());
+        assert!(profile.api_key_fingerprint(&env).is_none());
+    }
+
+    #[test]
+    fn acp_claude_subscription_mode_falls_back_to_home_claude_dir() {
+        let profile = acp_launch_profile(CLAUDE_SUBSCRIPTION_CREDENTIAL_MODE);
+        let env = BTreeMap::from([("HOME".to_string(), "/home/orchestrator".to_string())]);
+
+        let request = must(profile.to_create_request(
+            &env,
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/workspace/.opensymphony/openhands"),
+            Some(Uuid::nil()),
+        ));
+
+        assert_eq!(
+            request
+                .agent
+                .acp_env
+                .as_ref()
+                .and_then(|env| env.get("CLAUDE_CONFIG_DIR"))
+                .map(String::as_str),
+            Some("/home/orchestrator/.claude")
+        );
+    }
+
+    #[test]
+    fn acp_claude_subscription_mode_reports_missing_credential_directory() {
+        let profile = acp_launch_profile(CLAUDE_SUBSCRIPTION_CREDENTIAL_MODE);
+        let env = BTreeMap::new();
+
+        let error = profile
+            .to_create_request(
+                &env,
+                Path::new("/tmp/workspace"),
+                Path::new("/tmp/workspace/.opensymphony/openhands"),
+                Some(Uuid::nil()),
+            )
+            .expect_err("missing HOME and CLAUDE_CONFIG_DIR should be reported");
+        assert!(error.contains("CLAUDE_CONFIG_DIR"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn acp_launch_profile_round_trips_without_leaking_credentials() {
+        let profile = acp_launch_profile(CLAUDE_SUBSCRIPTION_CREDENTIAL_MODE);
+        let encoded = serde_json::to_string(&profile).expect("profile should serialize");
+        let decoded: ConversationLaunchProfile =
+            serde_json::from_str(&encoded).expect("profile should deserialize");
+
+        assert_eq!(decoded, profile);
+        // Only the env-var *name* is persisted, never a resolved path or token.
+        assert!(!encoded.contains("/home/orchestrator"));
+    }
+
     #[test]
     fn launch_profile_constructs_openai_subscription_llm_without_persisting_tokens() {
         let profile = ConversationLaunchProfile {
             workspace_kind: "LocalWorkspace".to_string(),
             confirmation_policy_kind: "NeverConfirm".to_string(),
             agent_kind: "Agent".to_string(),
-            llm_model: "gpt-5.2-codex".to_string(),
+            llm_model: Some("gpt-5.2-codex".to_string()),
             llm_credential_mode: "openai_subscription".to_string(),
             llm_api_key_env: None,
             llm_base_url_env: None,
@@ -3732,6 +4030,7 @@ mod tests {
             agent_include_default_tools: None,
             max_iterations: 12,
             stuck_detection: true,
+            acp: None,
             llm_api_key_fingerprint: None,
         };
         let env = BTreeMap::from([
@@ -3758,17 +4057,19 @@ mod tests {
             )
             .expect("subscription profile should construct a request");
         let profile_json = serde_json::to_string(&profile).expect("profile should serialize");
+        let llm = request
+            .agent
+            .llm
+            .as_ref()
+            .expect("native agent should carry an llm config");
 
-        assert_eq!(request.agent.llm.model, "openai/gpt-5.2-codex");
+        assert_eq!(llm.model, "openai/gpt-5.2-codex");
         assert_eq!(
-            request.agent.llm.base_url.as_deref(),
+            llm.base_url.as_deref(),
             Some("https://chatgpt.com/backend-api/codex")
         );
-        assert_eq!(
-            request.agent.llm.api_key.as_deref(),
-            Some("oauth-access-token")
-        );
-        assert_eq!(request.agent.llm.stream, Some(true));
+        assert_eq!(llm.api_key.as_deref(), Some("oauth-access-token"));
+        assert_eq!(llm.stream, Some(true));
         assert_eq!(
             profile
                 .llm_subscription
@@ -3781,20 +4082,14 @@ mod tests {
             Some("/Users/test/.cache/openhands/auth")
         );
         assert_eq!(
-            request
-                .agent
-                .llm
-                .extra_headers
+            llm.extra_headers
                 .as_ref()
                 .and_then(|headers| headers.get("originator"))
                 .map(String::as_str),
             Some("codex_cli_rs")
         );
         assert_eq!(
-            request
-                .agent
-                .llm
-                .litellm_extra_body
+            llm.litellm_extra_body
                 .as_ref()
                 .and_then(|body| body.get("store")),
             Some(&json!(false))

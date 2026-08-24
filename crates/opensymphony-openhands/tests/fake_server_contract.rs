@@ -406,10 +406,14 @@ async fn delete_conversation_then_recreate_requested_id_resets_history_and_updat
     let recreated = client
         .create_conversation(&ConversationCreateRequest {
             agent: crate::opensymphony_openhands::AgentConfig {
-                llm: crate::opensymphony_openhands::LlmConfig {
+                llm: Some(crate::opensymphony_openhands::LlmConfig {
                     api_key: Some("new-secret".to_string()),
-                    ..request.agent.clone().llm
-                },
+                    ..request
+                        .agent
+                        .clone()
+                        .llm
+                        .expect("native agent should carry an llm config")
+                }),
                 ..request.agent.clone()
             },
             ..request.clone()
@@ -422,7 +426,14 @@ async fn delete_conversation_then_recreate_requested_id_resets_history_and_updat
         .expect("history should still be searchable after recreation");
 
     assert_eq!(recreated.conversation_id, conversation.conversation_id);
-    assert_eq!(recreated.agent.llm.api_key.as_deref(), Some("new-secret"));
+    assert_eq!(
+        recreated
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.api_key.as_deref()),
+        Some("new-secret")
+    );
     assert!(
         events
             .items()

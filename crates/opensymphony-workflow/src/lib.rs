@@ -1937,6 +1937,219 @@ openhands:
     }
 
     #[test]
+    fn resolves_acp_agent_for_claude_code_subscription_auth() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      kind: ACPAgent
+      acp_command:
+        - npx
+        - -y
+        - "@agentclientprotocol/claude-agent-acp"
+      acp_session_mode: bypassPermissions
+      acp_model: claude-opus-4-7
+      acp_credential_mode: claude_subscription
+      acp_prompt_timeout_ms: 2400000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("ACP agent config should resolve");
+        let agent = &resolved.extensions.openhands.conversation.agent;
+
+        assert_eq!(agent.kind, "ACPAgent");
+        // The ACP server owns the model, tools, and context management.
+        assert!(agent.llm.is_none());
+        assert!(agent.condenser.is_none());
+        assert!(agent.tools.is_none());
+
+        let acp = agent.acp.as_ref().expect("acp config should resolve");
+        assert_eq!(
+            acp.command,
+            vec![
+                "npx".to_owned(),
+                "-y".to_owned(),
+                "@agentclientprotocol/claude-agent-acp".to_owned(),
+            ]
+        );
+        assert_eq!(acp.session_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(acp.model.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(acp.credential_mode, "claude_subscription");
+        assert_eq!(acp.auth_directory_env, "CLAUDE_CONFIG_DIR");
+        assert_eq!(acp.prompt_timeout_ms, Some(2_400_000));
+    }
+
+    #[test]
+    fn acp_agent_requires_acp_command() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      kind: ACPAgent
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("ACP agent without a command should be rejected");
+        assert!(
+            format!("{error}").contains("acp_command"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn acp_agent_rejects_llm_configuration() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      kind: ACPAgent
+      acp_command:
+        - npx
+        - -y
+        - "@agentclientprotocol/claude-agent-acp"
+      llm:
+        model: openai/gpt-5.4
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm config should be rejected for ACP agents");
+        assert!(
+            format!("{error}").contains("agent.llm"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn native_agent_rejects_acp_fields() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: openai/gpt-5.4
+      acp_command:
+        - npx
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("acp fields should be rejected for the native agent");
+        assert!(
+            format!("{error}").contains("acp_command"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn acp_agent_rejects_unknown_credential_mode() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      kind: ACPAgent
+      acp_command:
+        - npx
+      acp_credential_mode: totally_made_up
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unknown ACP credential mode should be rejected");
+        assert!(
+            format!("{error}").contains("acp_credential_mode"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn defaults_keep_native_openhands_agent_unchanged() {
+        let workflow = WorkflowDefinition::parse(sample_workflow()).expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("LLM_MODEL", "openai/gpt-5.4"),
+            ("HOME", "/home/operator"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("default workflow should resolve");
+        let agent = &resolved.extensions.openhands.conversation.agent;
+
+        assert_eq!(agent.kind, "Agent");
+        assert!(agent.acp.is_none());
+        assert!(agent.llm.is_some());
+        assert!(agent.tools.is_some());
+    }
+
+    #[test]
     fn gates_openhands_subscription_credential_mode_by_feature() {
         let workflow = WorkflowDefinition::parse(
             r#"---

@@ -35,6 +35,10 @@ pub const DEFAULT_ROUTING_MODEL_ENV: &str = "OPENSYMPHONY_MODEL";
 pub const DEFAULT_ROUTING_MODEL_PROFILE_ENV: &str = "OPENSYMPHONY_MODEL_PROFILE";
 pub const OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY: &str = "api_key";
 pub const OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION: &str = "openai_subscription";
+pub const OPENHANDS_ACP_AGENT_KIND: &str = "ACPAgent";
+pub const OPENHANDS_ACP_CREDENTIAL_MODE_INHERIT: &str = "inherit";
+pub const OPENHANDS_ACP_CREDENTIAL_MODE_CLAUDE_SUBSCRIPTION: &str = "claude_subscription";
+pub const DEFAULT_CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 pub const DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE: u64 = 240;
 pub const DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST: u64 = 2;
 
@@ -186,6 +190,22 @@ pub struct OpenHandsConversationAgentFrontMatter {
     pub tools: Option<Vec<OpenHandsConversationToolFrontMatter>>,
     pub include_default_tools: Option<Vec<String>>,
     pub log_completions: Option<bool>,
+    /// Command used to launch the ACP server, e.g.
+    /// `["npx", "-y", "@agentclientprotocol/claude-agent-acp"]`.
+    /// Required when `kind` is `ACPAgent`, rejected otherwise.
+    pub acp_command: Option<Vec<String>>,
+    pub acp_args: Option<Vec<String>>,
+    pub acp_env: Option<BTreeMap<String, String>>,
+    pub acp_session_mode: Option<String>,
+    pub acp_model: Option<String>,
+    pub acp_prompt_timeout_ms: Option<IntegerLike>,
+    /// How the ACP subprocess obtains its credentials: `inherit` (default) or
+    /// `claude_subscription`, which wires Claude Code's OAuth credential
+    /// directory into the subprocess environment.
+    pub acp_credential_mode: Option<String>,
+    /// Environment variable naming the Claude Code config directory. Defaults
+    /// to `CLAUDE_CONFIG_DIR`; only meaningful for `claude_subscription`.
+    pub acp_auth_directory_env: Option<String>,
     #[serde(flatten)]
     pub options: BTreeMap<String, serde_yaml::Value>,
 }
@@ -367,7 +387,24 @@ pub struct OpenHandsConversationAgentConfig {
     pub tools: Option<Vec<OpenHandsConversationToolConfig>>,
     pub include_default_tools: Option<Vec<String>>,
     pub log_completions: bool,
+    /// Present only for ACP agent kinds; `None` for the native OpenHands agent.
+    pub acp: Option<OpenHandsAcpConfig>,
     pub options: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// Resolved configuration for an ACP-backed agent. The ACP server owns the LLM,
+/// its tools, and its own authentication, so none of the usual `llm.*` plumbing
+/// applies here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandsAcpConfig {
+    pub command: Vec<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub session_mode: Option<String>,
+    pub model: Option<String>,
+    pub prompt_timeout_ms: Option<u64>,
+    pub credential_mode: String,
+    pub auth_directory_env: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
