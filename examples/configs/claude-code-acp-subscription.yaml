@@ -7,11 +7,26 @@
 # -------------
 #   opensymphony install openhands     # pinned openhands-agent-server
 #   claude login                       # writes OAuth credentials to ~/.claude
-#   node/npx on PATH                   # launches @agentclientprotocol/claude-agent-acp
+#   Node >= 22 on the agent-server's PATH
+#
+# Node version
+# ------------
+# OpenSymphony itself needs no Node. The requirement comes from the ACP server
+# package named in `acp_command`: @agentclientprotocol/claude-agent-acp declares
+# `engines: { node: ">=22" }`. A different ACP server sets its own floor
+# (@google/gemini-cli wants >=20; @zed-industries/codex-acp declares none).
+#
+# The version that matters is the one on PATH *of the OpenHands agent-server
+# process*, not of your login shell, because `npx` inherits that process's
+# environment. Starting the server under system Node 18 fails at the ACP
+# handshake with a "Connection closed" crash — npm does not enforce `engines`
+# by default, so the package launches and then dies. Check with:
+#
+#   node --version                     # in the environment that starts the server
 #
 # The ACP subprocess inherits the agent-server's environment, so the
 # agent-server must run as the same user that ran `claude login` (or must see
-# the same CLAUDE_CONFIG_DIR).
+# the same CLAUDE_CONFIG_DIR), with a new enough Node on its PATH.
 #
 # Merge the `openhands:` block below into your WORKFLOW.md front matter.
 

@@ -326,6 +326,11 @@ tool surface, and its own authentication, so it can run against a **Claude Pro/M
 subscription** through Claude Code's own OAuth credentials rather than a metered
 Anthropic API key.
 
+ACP servers are separate processes that OpenSymphony does not ship. Whatever
+you name in `acp_command` brings its own runtime prerequisites — see
+[ACP server runtime requirements](#acp-server-runtime-requirements) before your
+first run.
+
 Select it with `openhands.conversation.agent.kind: ACPAgent`:
 
 ```yaml
@@ -362,6 +367,57 @@ not required. Conversely the `acp_*` fields are rejected for the default
 The same machinery works for any ACP server. Swap the command for
 `@zed-industries/codex-acp` (`acp_session_mode: full-access`) or
 `@google/gemini-cli --acp` (`acp_session_mode: yolo`).
+
+### ACP Server Runtime Requirements
+
+OpenSymphony is a Rust binary and needs no Node of its own. The ACP server named
+in `acp_command` does, and each package sets its own floor:
+
+| ACP server | Declared `engines.node` |
+|------------|-------------------------|
+| `@agentclientprotocol/claude-agent-acp` | `>=22` |
+| `@google/gemini-cli` | `>=20` |
+| `@zed-industries/codex-acp` | none declared |
+
+This is a **conditional** dependency, exactly like the existing Codex harness:
+the default native OpenHands agent needs no Node at all, and the requirement
+only applies if you select an ACP server that has one.
+
+The version that matters is the one on the PATH **of the OpenHands agent-server
+process**, not of your interactive shell. `npx` inherits the environment of the
+process that spawns it, so a server started by a systemd unit, a container
+entrypoint, or a login shell with a different Node on PATH will use that Node —
+even if `node --version` in your terminal reports something newer.
+
+### Troubleshooting ACP Runs
+
+**`Connection closed` during the ACP handshake.** Almost always a Node version
+below the ACP server's floor. npm does not enforce `engines` by default, so
+`npx` happily launches the package and it dies on first use rather than
+reporting a clear version error. Check the Node version in the environment that
+starts the agent-server and upgrade it to satisfy the table above.
+
+**Claude Code prompts for permission, or stalls waiting for input.** Set
+`acp_session_mode` for your server (`bypassPermissions` for Claude Code,
+`full-access` for Codex, `yolo` for Gemini CLI). Unattended runs cannot answer
+an interactive prompt.
+
+**Requests bill to an API key instead of the subscription.** Confirm
+`acp_credential_mode: claude_subscription` is set and that the resolved
+directory really holds the OAuth credentials from `claude login`. When
+`CLAUDE_CONFIG_DIR` is set, the OpenHands SDK strips `ANTHROPIC_API_KEY` and
+`ANTHROPIC_BASE_URL` from the subprocess, so a leaking key usually means the
+credential directory did not resolve as expected.
+
+A healthy start-up logs the handshake, the forwarded session mode, and the
+first completed turn:
+
+```
+ACP server initialized
+Setting ACP session mode: bypassPermissions
+Sending ACP prompt
+ACP prompt returned in 1.2s (async)
+```
 
 ### Claude Subscription Auth
 
