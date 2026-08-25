@@ -528,7 +528,7 @@ mod tests {
             },
             agent: crate::opensymphony_openhands::AgentConfig {
                 kind: "Agent".to_string(),
-                llm: crate::opensymphony_openhands::LlmConfig {
+                llm: Some(crate::opensymphony_openhands::LlmConfig {
                     model: "openai/gpt-5.4".to_string(),
                     api_key: None,
                     base_url: None,
@@ -536,10 +536,11 @@ mod tests {
                     extra_headers: None,
                     litellm_extra_body: None,
                     stream: None,
-                },
+                }),
                 condenser: None,
                 tools: None,
                 include_default_tools: None,
+                ..Default::default()
             },
             stats: None,
         }

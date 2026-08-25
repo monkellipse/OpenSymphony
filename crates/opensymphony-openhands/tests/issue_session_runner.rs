@@ -551,7 +551,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
     assert_eq!(launch_profile.workspace_kind, "LocalWorkspace");
     assert_eq!(launch_profile.confirmation_policy_kind, "NeverConfirm");
     assert_eq!(launch_profile.agent_kind, "Agent");
-    assert_eq!(launch_profile.llm_model, "openai/gpt-5.4");
+    assert_eq!(launch_profile.llm_model.as_deref(), Some("openai/gpt-5.4"));
     assert_eq!(
         launch_profile.agent_tools.as_ref().map(|tools| tools
             .iter()
@@ -1576,7 +1576,15 @@ async fn issue_session_runner_rehydrates_a_missing_conversation_with_fresh_promp
     );
 
     let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
-    assert!(!create_request.agent.llm.model.is_empty());
+    assert!(
+        !create_request
+            .agent
+            .llm
+            .as_ref()
+            .expect("native agent should carry an llm config")
+            .model
+            .is_empty()
+    );
 
     let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
     assert!(manifest.workflow_prompt_seeded);
@@ -1628,7 +1636,11 @@ async fn issue_session_runner_forwards_configured_condenser_to_create_request() 
         .expect("issue session run should succeed");
 
     let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
-    let agent_llm = create_request.agent.llm.clone();
+    let agent_llm = create_request
+        .agent
+        .llm
+        .clone()
+        .expect("native agent should carry an llm config");
     let condenser = create_request
         .agent
         .condenser
@@ -1839,12 +1851,14 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
         crate::opensymphony_workspace::RunStatus::Succeeded
     );
     let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    let create_llm = create_request
+        .agent
+        .llm
+        .as_ref()
+        .expect("native agent should carry an llm config");
+    assert_eq!(create_llm.api_key.as_deref(), Some("provider-secret"));
     assert_eq!(
-        create_request.agent.llm.api_key.as_deref(),
-        Some("provider-secret")
-    );
-    assert_eq!(
-        create_request.agent.llm.base_url.as_deref(),
+        create_llm.base_url.as_deref(),
         Some("https://provider.example.test/v1")
     );
 
@@ -1863,9 +1877,7 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
     );
     assert_eq!(
         manifest.llm_config_fingerprint,
-        Some(LlmConfigFingerprint::from_llm_config(
-            &create_request.agent.llm
-        ))
+        Some(LlmConfigFingerprint::from_llm_config(create_llm))
     );
     assert_ne!(
         manifest
@@ -2140,7 +2152,11 @@ async fn issue_session_runner_reuses_conversation_despite_llm_config_changes() {
         .expect("conversation should be fetchable");
     // API key is still the old one - we don't auto-update on drift
     assert_eq!(
-        reused_conversation.agent.llm.api_key.as_deref(),
+        reused_conversation
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.api_key.as_deref()),
         Some("old-secret")
     );
 

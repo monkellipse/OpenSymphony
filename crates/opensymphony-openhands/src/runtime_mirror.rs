@@ -614,7 +614,7 @@ fn synthetic_conversation(status: &str) -> Conversation {
         },
         agent: AgentConfig {
             kind: "Agent".to_string(),
-            llm: LlmConfig {
+            llm: Some(LlmConfig {
                 model: "synthetic".to_string(),
                 api_key: None,
                 base_url: None,
@@ -622,10 +622,11 @@ fn synthetic_conversation(status: &str) -> Conversation {
                 extra_headers: None,
                 litellm_extra_body: None,
                 stream: None,
-            },
+            }),
             condenser: None,
             tools: None,
             include_default_tools: None,
+            ..Default::default()
         },
         stats: None,
     }
@@ -658,7 +659,7 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: LlmConfig {
+                llm: Some(LlmConfig {
                     model: "openai/gpt-5.4".to_string(),
                     api_key: None,
                     base_url: None,
@@ -666,10 +667,11 @@ mod tests {
                     extra_headers: None,
                     litellm_extra_body: None,
                     stream: None,
-                },
+                }),
                 condenser: None,
                 tools: None,
                 include_default_tools: None,
+                ..Default::default()
             },
             stats: None,
         }

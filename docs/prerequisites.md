@@ -36,6 +36,34 @@ minimum through `rust-version`.
 **Alternative**
 If you already have Python 3.13.12 installed, you can keep it and just install `uv`. If you need a manual Python installer, use the official [Python downloads page](https://www.python.org/downloads/).
 
+---
+
+#### Node.js for ACP agents (conditional)
+
+Only needed if you run an OpenHands `ACPAgent` (`openhands.conversation.agent.kind:
+ACPAgent`) whose `acp_command` is an npm-published ACP server. The default
+native OpenHands agent needs no Node.
+
+The minimum version is set by the ACP server package, not by OpenSymphony:
+
+| ACP server | Declared `engines.node` |
+|------------|-------------------------|
+| `@agentclientprotocol/claude-agent-acp` | `>=22` |
+| `@google/gemini-cli` | `>=20` |
+| `@zed-industries/codex-acp` | none declared |
+
+1. Install Node from [nodejs.org](https://nodejs.org/) or a version manager such
+   as [nvm](https://github.com/nvm-sh/nvm) or [fnm](https://github.com/Schniz/fnm).
+2. Verify with `node --version`.
+3. Make sure that version is on the PATH **of the process that starts the
+   OpenHands agent-server**, not just your interactive shell — `npx` inherits
+   the server process's environment.
+
+A Node older than the ACP server's floor fails at the ACP handshake with a
+`Connection closed` crash rather than a version error, because npm does not
+enforce `engines` by default. See
+[ACP server runtime requirements](configuration.md#acp-server-runtime-requirements).
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

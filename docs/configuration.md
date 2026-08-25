@@ -163,6 +163,8 @@ Important fields:
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
 | `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
 | `openhands.conversation.agent.llm.credential_mode` | LLM credential adapter | - | `api_key` or `openai_subscription` |
+| `openhands.conversation.agent.kind` | OpenHands agent class | - | `Agent` (default) or `ACPAgent` |
+| `openhands.conversation.agent.acp_command` | ACP server launch command (required for `ACPAgent`) | - | `[npx, -y, "@agentclientprotocol/claude-agent-acp"]` |
 
 For Linear trackers, `tracker.project_slug` should store the project's
 `slugId`, not a `team/project` path.
@@ -314,6 +316,144 @@ future broker. They are retained in the launch profile for diagnostics and UI
 status, but OpenSymphony does not forward them as undocumented agent-server
 conversation fields. Only the short-lived access token reference is resolved
 when building the OpenHands conversation request.
+
+## ACP Agents (Claude Code, Codex, Gemini CLI)
+
+The pinned OpenHands agent-server (`1.24.0`) ships an `ACPAgent` that delegates
+a conversation to an [Agent Client Protocol](https://agentclientprotocol.com)
+server instead of calling an LLM directly. The ACP server owns the model, the
+tool surface, and its own authentication, so it can run against a **Claude Pro/Max
+subscription** through Claude Code's own OAuth credentials rather than a metered
+Anthropic API key.
+
+ACP servers are separate processes that OpenSymphony does not ship. Whatever
+you name in `acp_command` brings its own runtime prerequisites — see
+[ACP server runtime requirements](#acp-server-runtime-requirements) before your
+first run.
+
+Select it with `openhands.conversation.agent.kind: ACPAgent`:
+
+```yaml
+openhands:
+  conversation:
+    agent:
+      kind: ACPAgent
+      acp_command:
+        - npx
+        - -y
+        - "@agentclientprotocol/claude-agent-acp"
+      acp_session_mode: bypassPermissions
+      acp_model: claude-opus-4-7
+      acp_credential_mode: claude_subscription
+```
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `acp_command` | Command that launches the ACP server. Required. | - |
+| `acp_args` | Extra arguments appended to `acp_command`. | `[]` |
+| `acp_env` | Extra environment variables for the ACP subprocess. | `{}` |
+| `acp_session_mode` | ACP session mode ID. `bypassPermissions` (Claude Code), `full-access` (Codex), `yolo` (Gemini CLI). Auto-detected from the server when unset. | server default |
+| `acp_model` | Model the ACP server should use. | server default |
+| `acp_prompt_timeout_ms` | Timeout for a single ACP turn. Sent to the SDK as fractional seconds. | `1800000` (SDK default) |
+| `acp_credential_mode` | `inherit` or `claude_subscription`. | `inherit` |
+| `acp_auth_directory_env` | Env var naming the Claude config directory. | `CLAUDE_CONFIG_DIR` |
+
+Because the ACP server supplies its own model and tools, `llm`, `condenser`,
+`tools`, and `include_default_tools` are **rejected** under `kind: ACPAgent`
+rather than silently forwarded, and `openhands.conversation.agent.llm.model` is
+not required. Conversely the `acp_*` fields are rejected for the default
+`kind: Agent`, so a typo cannot quietly downgrade a run to API billing.
+
+The same machinery works for any ACP server. Swap the command for
+`@zed-industries/codex-acp` (`acp_session_mode: full-access`) or
+`@google/gemini-cli --acp` (`acp_session_mode: yolo`).
+
+### ACP Server Runtime Requirements
+
+OpenSymphony is a Rust binary and needs no Node of its own. The ACP server named
+in `acp_command` does, and each package sets its own floor:
+
+| ACP server | Declared `engines.node` |
+|------------|-------------------------|
+| `@agentclientprotocol/claude-agent-acp` | `>=22` |
+| `@google/gemini-cli` | `>=20` |
+| `@zed-industries/codex-acp` | none declared |
+
+This is a **conditional** dependency, exactly like the existing Codex harness:
+the default native OpenHands agent needs no Node at all, and the requirement
+only applies if you select an ACP server that has one.
+
+The version that matters is the one on the PATH **of the OpenHands agent-server
+process**, not of your interactive shell. `npx` inherits the environment of the
+process that spawns it, so a server started by a systemd unit, a container
+entrypoint, or a login shell with a different Node on PATH will use that Node —
+even if `node --version` in your terminal reports something newer.
+
+### Troubleshooting ACP Runs
+
+**`Connection closed` during the ACP handshake.** Almost always a Node version
+below the ACP server's floor. npm does not enforce `engines` by default, so
+`npx` happily launches the package and it dies on first use rather than
+reporting a clear version error. Check the Node version in the environment that
+starts the agent-server and upgrade it to satisfy the table above.
+
+**Claude Code prompts for permission, or stalls waiting for input.** Set
+`acp_session_mode` for your server (`bypassPermissions` for Claude Code,
+`full-access` for Codex, `yolo` for Gemini CLI). Unattended runs cannot answer
+an interactive prompt.
+
+**Requests bill to an API key instead of the subscription.** Confirm
+`acp_credential_mode: claude_subscription` is set and that the resolved
+directory really holds the OAuth credentials from `claude login`. When
+`CLAUDE_CONFIG_DIR` is set, the OpenHands SDK strips `ANTHROPIC_API_KEY` and
+`ANTHROPIC_BASE_URL` from the subprocess, so a leaking key usually means the
+credential directory did not resolve as expected.
+
+A healthy start-up logs the handshake, the forwarded session mode, and the
+first completed turn:
+
+```
+ACP server initialized
+Setting ACP session mode: bypassPermissions
+Sending ACP prompt
+ACP prompt returned in 1.2s (async)
+```
+
+### Claude Subscription Auth
+
+`acp_credential_mode: claude_subscription` resolves the Claude Code
+configuration directory and forwards it to the ACP subprocess as
+`CLAUDE_CONFIG_DIR`. It is read from `acp_auth_directory_env`
+(`CLAUDE_CONFIG_DIR` by default), falling back to `$HOME/.claude`.
+
+That directory selects Claude Code's OAuth credential file — the credentials
+written by `claude login`. The pinned OpenHands SDK strips `ANTHROPIC_API_KEY`
+and `ANTHROPIC_BASE_URL` from the subprocess whenever `CLAUDE_CONFIG_DIR` is
+set, so an inherited API key cannot silently override subscription auth or
+redirect requests to a proxy.
+
+OpenSymphony never reads, copies, or persists the OAuth tokens themselves: the
+launch profile stores only the environment-variable *name*, and the resolved
+directory path is passed to the agent-server at conversation-create time. Unlike
+the OpenAI ChatGPT/Codex adapter, this path resolves no access token, so it is
+not behind the `openhands-subscription-credentials` Cargo feature.
+
+Log in once as the user that runs the orchestrator:
+
+```bash
+claude login          # writes OAuth credentials into ~/.claude
+opensymphony run
+```
+
+The OpenHands agent-server must run as that same user (or see the same
+`CLAUDE_CONFIG_DIR`) because the ACP subprocess inherits the agent-server's
+environment. When OpenSymphony starts the server itself, the process inherits
+the orchestrator's environment; for a pre-existing or remote agent-server, set
+`CLAUDE_CONFIG_DIR` on that process — or point `acp_env` at a directory it can
+read.
+
+Anthropic's Terms of Service govern subscription use. Confirm your plan permits
+automated Claude Code usage before running an unattended factory against it.
 
 ### Local Codex And Subscription Testing
 

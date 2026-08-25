@@ -21,7 +21,7 @@ OpenSymphony automates software development workflows by:
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
 - **Dependency-aware Task Graph**: Shows dispatchable work, roadmap backlog, and selected-task critical paths
-- **Harness selection**: Default OpenHands agent-server execution, plus local Codex app-server support for ChatGPT subscription-backed runs
+- **Harness selection**: Default OpenHands agent-server execution, local Codex app-server support for ChatGPT subscription-backed runs, and OpenHands ACP agents for Claude Code / Codex / Gemini CLI — including Claude Pro/Max subscription-backed runs
 - **Code Graph**: Tree-sitter-backed symbols, diagnostics, and source-cited structural context for agents
 - **Operational Knowledge Graph**: Builds agent-queriable and human-navigable memory from completed work
 
@@ -42,8 +42,9 @@ not separately published crates.
 - Linear API key (for tracker integration)
 - For OpenHands: Python 3.13.12 with `uv`, plus an LLM API key for an OpenAI-compatible/LiteLLM provider
 - For Codex: the [Codex CLI](https://developers.openai.com/codex/cli) with a working ChatGPT login
+- For OpenHands ACP agents (Claude Code, Gemini CLI): Node on the agent-server's PATH, at the version the chosen ACP server requires — `>=22` for `@agentclientprotocol/claude-agent-acp`. No LLM API key is needed; the ACP server authenticates itself.
 
-For platform-specific Rust and Python/`uv` setup steps, see [Prerequisites](docs/prerequisites.md).
+For platform-specific Rust, Python/`uv`, and Node setup steps, see [Prerequisites](docs/prerequisites.md).
 
 ### Installation
 

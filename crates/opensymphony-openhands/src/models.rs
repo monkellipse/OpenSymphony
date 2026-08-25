@@ -9,6 +9,7 @@ fn default_true() -> bool {
     true
 }
 
+pub const ACP_AGENT_KIND: &str = "ACPAgent";
 pub const LLM_SUMMARIZING_CONDENSER_KIND: &str = "LLMSummarizingCondenser";
 pub const LLM_SUMMARIZING_CONDENSER_USAGE_ID: &str = "condenser";
 
@@ -91,16 +92,68 @@ pub struct ToolConfig {
     pub params: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentConfig {
     pub kind: String,
-    pub llm: LlmConfig,
+    /// Omitted for `ACPAgent`, where the ACP server owns the model and the SDK
+    /// substitutes its own `acp-managed` sentinel LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condenser: Option<CondenserConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_default_tools: Option<Vec<String>>,
+    /// Command used to launch the ACP server process. Required by the OpenHands
+    /// SDK whenever `kind` is `ACPAgent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_env: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_model: Option<String>,
+    /// Prompt timeout. Stored in milliseconds to match the rest of the
+    /// OpenSymphony config surface, but the SDK field is fractional seconds, so
+    /// it is converted on the wire.
+    #[serde(
+        default,
+        rename = "acp_prompt_timeout",
+        serialize_with = "serialize_millis_as_seconds",
+        deserialize_with = "deserialize_seconds_as_millis",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub acp_prompt_timeout_ms: Option<u64>,
+}
+
+impl AgentConfig {
+    /// True when this agent delegates to an ACP server rather than to an
+    /// OpenSymphony-configured LLM.
+    pub fn is_acp(&self) -> bool {
+        self.kind == ACP_AGENT_KIND
+    }
+}
+
+fn serialize_millis_as_seconds<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(millis) => serializer.serialize_f64(*millis as f64 / 1000.0),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_seconds_as_millis<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let seconds = Option::<f64>::deserialize(deserializer)?;
+    Ok(seconds.map(|seconds| (seconds * 1000.0).round() as u64))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,7 +230,7 @@ impl ConversationCreateRequest {
             },
             agent: AgentConfig {
                 kind: config.agent_kind,
-                llm: LlmConfig {
+                llm: Some(LlmConfig {
                     model,
                     api_key: config.api_key,
                     base_url: config.base_url,
@@ -185,10 +238,11 @@ impl ConversationCreateRequest {
                     extra_headers: None,
                     litellm_extra_body: None,
                     stream: None,
-                },
+                }),
                 condenser: None,
                 tools: None,
                 include_default_tools: None,
+                ..Default::default()
             },
         }
     }
@@ -459,7 +513,7 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: LlmConfig {
+                llm: Some(LlmConfig {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
                     base_url: None,
@@ -467,10 +521,11 @@ mod tests {
                     extra_headers: None,
                     litellm_extra_body: None,
                     stream: None,
-                },
+                }),
                 condenser: None,
                 tools: None,
                 include_default_tools: None,
+                ..Default::default()
             },
         };
 
@@ -542,7 +597,7 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: LlmConfig {
+                llm: Some(LlmConfig {
                     model: "openai/gpt-5.2-codex".to_string(),
                     api_key: Some("oauth-access-token".to_string()),
                     base_url: Some("https://chatgpt.com/backend-api/codex".to_string()),
@@ -557,10 +612,11 @@ mod tests {
                     ])),
                     litellm_extra_body: Some(BTreeMap::from([("store".to_string(), json!(false))])),
                     stream: Some(true),
-                },
+                }),
                 condenser: None,
                 tools: None,
                 include_default_tools: None,
+                ..Default::default()
             },
         };
 
@@ -609,7 +665,7 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: LlmConfig {
+                llm: Some(LlmConfig {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
                     base_url: Some("https://example.com/v1".to_string()),
@@ -617,7 +673,7 @@ mod tests {
                     extra_headers: None,
                     litellm_extra_body: None,
                     stream: None,
-                },
+                }),
                 condenser: Some(CondenserConfig::llm_summarizing(
                     LlmConfig {
                         model: "fake-model".to_string(),
@@ -633,6 +689,7 @@ mod tests {
                 )),
                 tools: None,
                 include_default_tools: None,
+                ..Default::default()
             },
         };
 
@@ -671,7 +728,7 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: LlmConfig {
+                llm: Some(LlmConfig {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
                     base_url: Some("https://example.com/v1".to_string()),
@@ -679,7 +736,7 @@ mod tests {
                     extra_headers: None,
                     litellm_extra_body: None,
                     stream: None,
-                },
+                }),
                 condenser: None,
                 tools: Some(vec![
                     ToolConfig {
@@ -698,6 +755,7 @@ mod tests {
                     "FinishTool".to_string(),
                     "ThinkTool".to_string(),
                 ]),
+                ..Default::default()
             },
         };
 

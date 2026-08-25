@@ -9,31 +9,34 @@ use url::{Host, Url};
 use super::{
     error::WorkflowConfigError,
     model::{
-        AgentConfig, AgentFrontMatter, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
-        DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS,
-        DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE,
-        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
-        DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
-        DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE, DEFAULT_OPENHANDS_LLM_MODEL,
-        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
-        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
-        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS, DEFAULT_ROUTING_HARNESS_ENV,
-        DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV, DEFAULT_STALL_TIMEOUT_MS,
-        DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+        AgentConfig, AgentFrontMatter, DEFAULT_CLAUDE_CONFIG_DIR_ENV, DEFAULT_HOOK_TIMEOUT_MS,
+        DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS,
+        DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AGENT_TOOLS,
+        DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
+        DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE,
+        DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_OPENHANDS_MAX_ITERATIONS,
+        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS,
+        DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
+        DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig,
+        HooksFrontMatter, IntegerLike, OPENHANDS_ACP_AGENT_KIND,
+        OPENHANDS_ACP_CREDENTIAL_MODE_CLAUDE_SUBSCRIPTION, OPENHANDS_ACP_CREDENTIAL_MODE_INHERIT,
         OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY, OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION,
-        OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
-        OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
-        OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
-        OpenHandsConversationConfig, OpenHandsConversationFrontMatter,
-        OpenHandsConversationToolConfig, OpenHandsFrontMatter, OpenHandsLlmConfig,
-        OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
-        OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
-        OpenHandsTransportConfig, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
-        PollingConfig, PollingFrontMatter, ResolvedWorkflow, RoutingConfig, RoutingFrontMatter,
-        TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
-        WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
+        OpenHandsAcpConfig, OpenHandsConfig, OpenHandsConfirmationPolicy,
+        OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
+        OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
+        OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
+        OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig, OpenHandsFrontMatter,
+        OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
+        OpenHandsLocalServerFrontMatter, OpenHandsSubscriptionCredentialConfig,
+        OpenHandsSubscriptionCredentialFrontMatter, OpenHandsTransportConfig,
+        OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
+        ResolvedWorkflow, RoutingConfig, RoutingFrontMatter, TrackerConfig, TrackerFrontMatter,
+        TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
+        WorkspaceFrontMatter,
     },
 };
 
@@ -487,6 +490,7 @@ fn default_inactive_openhands_config() -> OpenHandsConfig {
                 tools: Some(default_openhands_agent_tools()),
                 include_default_tools: None,
                 log_completions: false,
+                acp: None,
                 options: BTreeMap::new(),
             },
         },
@@ -713,6 +717,7 @@ fn resolve_openhands_conversation<E: Environment>(
             tools: Some(default_openhands_agent_tools()),
             include_default_tools: None,
             log_completions: false,
+            acp: None,
             options: BTreeMap::new(),
         },
     };
@@ -786,6 +791,12 @@ fn resolve_openhands_agent<E: Environment>(
         None => DEFAULT_OPENHANDS_AGENT_KIND.to_owned(),
     };
 
+    if kind == OPENHANDS_ACP_AGENT_KIND {
+        return resolve_openhands_acp_agent(kind, agent, env);
+    }
+
+    reject_acp_fields_for_native_agent(agent)?;
+
     Ok(OpenHandsConversationAgentConfig {
         kind,
         llm: match agent.llm.as_ref() {
@@ -803,8 +814,239 @@ fn resolve_openhands_agent<E: Environment>(
             .map(|tools| resolve_openhands_default_tools(tools, env))
             .transpose()?,
         log_completions: false,
+        acp: None,
         options: BTreeMap::new(),
     })
+}
+
+/// Resolve an ACP-backed agent (`kind: ACPAgent`).
+///
+/// The ACP server owns the model, the tool surface, and its own credentials, so
+/// the usual `llm`/`tools`/`condenser` plumbing is rejected here rather than
+/// silently forwarded: sending a condenser without a real LLM, or the default
+/// tool list the ACP server does not use, produces confusing runtime failures.
+fn resolve_openhands_acp_agent<E: Environment>(
+    kind: String,
+    agent: &OpenHandsConversationAgentFrontMatter,
+    env: &E,
+) -> Result<OpenHandsConversationAgentConfig, WorkflowConfigError> {
+    for (field, occupied) in [
+        ("openhands.conversation.agent.llm", agent.llm.is_some()),
+        (
+            "openhands.conversation.agent.condenser",
+            agent.condenser.is_some(),
+        ),
+        ("openhands.conversation.agent.tools", agent.tools.is_some()),
+        (
+            "openhands.conversation.agent.include_default_tools",
+            agent.include_default_tools.is_some(),
+        ),
+    ] {
+        if occupied {
+            return Err(WorkflowConfigError::InvalidField {
+                field,
+                message: format!(
+                    "is not supported for `{OPENHANDS_ACP_AGENT_KIND}`; the ACP server owns its own model, tools, and context management"
+                ),
+            });
+        }
+    }
+
+    let raw_command = agent
+        .acp_command
+        .as_ref()
+        .ok_or(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.acp_command",
+            message: format!("is required when `kind` is `{OPENHANDS_ACP_AGENT_KIND}`"),
+        })?;
+
+    let command =
+        resolve_openhands_acp_argv(raw_command, env, "openhands.conversation.agent.acp_command")?;
+    if command.is_empty() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.acp_command",
+            message: "must contain at least the program to execute".to_owned(),
+        });
+    }
+
+    let args = match agent.acp_args.as_ref() {
+        Some(args) => {
+            resolve_openhands_acp_argv(args, env, "openhands.conversation.agent.acp_args")?
+        }
+        None => Vec::new(),
+    };
+
+    let acp_env = match agent.acp_env.as_ref() {
+        Some(values) => resolve_string_map(values, env, "openhands.conversation.agent.acp_env")?,
+        None => BTreeMap::new(),
+    };
+
+    let session_mode = agent
+        .acp_session_mode
+        .as_deref()
+        .map(|mode| {
+            let resolved =
+                resolve_string(mode, env, "openhands.conversation.agent.acp_session_mode")?;
+            normalize_optional_owned(resolved).ok_or(WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.agent.acp_session_mode",
+                message: "must not be empty".to_owned(),
+            })
+        })
+        .transpose()?;
+
+    let model = agent
+        .acp_model
+        .as_deref()
+        .map(|model| {
+            let resolved = resolve_string(model, env, "openhands.conversation.agent.acp_model")?;
+            normalize_optional_owned(resolved).ok_or(WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.agent.acp_model",
+                message: "must not be empty".to_owned(),
+            })
+        })
+        .transpose()?;
+
+    let prompt_timeout_ms = agent
+        .acp_prompt_timeout_ms
+        .as_ref()
+        .map(|value| {
+            resolve_positive_u64(
+                Some(value),
+                "openhands.conversation.agent.acp_prompt_timeout_ms",
+                0,
+            )
+        })
+        .transpose()?;
+
+    let credential_mode = match agent.acp_credential_mode.as_deref() {
+        Some(mode) => {
+            let resolved = resolve_string(
+                mode,
+                env,
+                "openhands.conversation.agent.acp_credential_mode",
+            )?;
+            let normalized =
+                normalize_optional_owned(resolved).ok_or(WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.acp_credential_mode",
+                    message: "must not be empty".to_owned(),
+                })?;
+            match normalized.as_str() {
+                OPENHANDS_ACP_CREDENTIAL_MODE_INHERIT
+                | OPENHANDS_ACP_CREDENTIAL_MODE_CLAUDE_SUBSCRIPTION => normalized,
+                other => {
+                    return Err(WorkflowConfigError::InvalidField {
+                        field: "openhands.conversation.agent.acp_credential_mode",
+                        message: format!(
+                            "unsupported mode `{other}`; expected `{OPENHANDS_ACP_CREDENTIAL_MODE_INHERIT}` or `{OPENHANDS_ACP_CREDENTIAL_MODE_CLAUDE_SUBSCRIPTION}`"
+                        ),
+                    });
+                }
+            }
+        }
+        None => OPENHANDS_ACP_CREDENTIAL_MODE_INHERIT.to_owned(),
+    };
+
+    let auth_directory_env = resolve_string_or_default(
+        agent.acp_auth_directory_env.as_deref(),
+        env,
+        "openhands.conversation.agent.acp_auth_directory_env",
+        DEFAULT_CLAUDE_CONFIG_DIR_ENV,
+    )?;
+    let auth_directory_env =
+        normalize_optional_owned(auth_directory_env).ok_or(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.acp_auth_directory_env",
+            message: "must not be empty".to_owned(),
+        })?;
+
+    Ok(OpenHandsConversationAgentConfig {
+        kind,
+        llm: None,
+        condenser: None,
+        tools: None,
+        include_default_tools: None,
+        log_completions: false,
+        acp: Some(OpenHandsAcpConfig {
+            command,
+            args,
+            env: acp_env,
+            session_mode,
+            model,
+            prompt_timeout_ms,
+            credential_mode,
+            auth_directory_env,
+        }),
+        options: BTreeMap::new(),
+    })
+}
+
+fn resolve_openhands_acp_argv<E: Environment>(
+    values: &[String],
+    env: &E,
+    field: &'static str,
+) -> Result<Vec<String>, WorkflowConfigError> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let resolved = resolve_string(value, env, field)?;
+            normalize_optional_owned(resolved).ok_or(WorkflowConfigError::InvalidField {
+                field,
+                message: format!("entry {index} must not be empty"),
+            })
+        })
+        .collect()
+}
+
+fn reject_acp_fields_for_native_agent(
+    agent: &OpenHandsConversationAgentFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    let configured = [
+        (
+            "openhands.conversation.agent.acp_command",
+            agent.acp_command.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_args",
+            agent.acp_args.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_env",
+            agent.acp_env.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_session_mode",
+            agent.acp_session_mode.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_model",
+            agent.acp_model.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_prompt_timeout_ms",
+            agent.acp_prompt_timeout_ms.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_credential_mode",
+            agent.acp_credential_mode.is_some(),
+        ),
+        (
+            "openhands.conversation.agent.acp_auth_directory_env",
+            agent.acp_auth_directory_env.is_some(),
+        ),
+    ];
+
+    for (field, occupied) in configured {
+        if occupied {
+            return Err(WorkflowConfigError::InvalidField {
+                field,
+                message: format!(
+                    "is only supported when `openhands.conversation.agent.kind` is `{OPENHANDS_ACP_AGENT_KIND}`"
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_openhands_agent_tools<E: Environment>(
